@@ -5,6 +5,7 @@ LDFLAGS ?=
 
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
+TEST_RUNNER ?= $(shell if [ "$$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then printf sudo; fi)
 
 BUILD   := build
 SRC     := src
@@ -53,13 +54,14 @@ install: all
 	install -m 0755 $(BUILD)/cgroupctl $(DESTDIR)$(BINDIR)/cgroupctl
 
 test: all
-	tests/smoke.sh
-	tests/wait.sh
-	tests/admission.sh
-	tests/orchestration.sh
-	tests/cleanup.sh
-	tests/oom.sh
-	tests/pressure.sh
+	tests/protocol_injection.sh
+	$(TEST_RUNNER) tests/smoke.sh
+	$(TEST_RUNNER) tests/wait.sh
+	$(TEST_RUNNER) tests/admission.sh
+	$(TEST_RUNNER) tests/orchestration.sh
+	$(TEST_RUNNER) tests/cleanup.sh
+	$(TEST_RUNNER) tests/oom.sh
+	$(TEST_RUNNER) tests/pressure.sh
 
 bench: all
 	tests/run_bench.sh

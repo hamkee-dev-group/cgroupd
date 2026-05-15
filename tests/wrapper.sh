@@ -5,7 +5,7 @@ if [ "${1:-}" = "run" ]; then
     shift
 fi
 
-while [ $
+while [ "$#" -gt 0 ]; do
     case "$1" in
         --policy-file)
             shift 2

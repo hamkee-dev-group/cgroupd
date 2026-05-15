@@ -3,6 +3,8 @@
 
 #include <errno.h>
 #include <getopt.h>
+#include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,7 +100,76 @@ static int response_field_int(const char *buf, const char *key, int *out) {
     return 0;
 }
 
+static int reject_header_value(const char *what, const char *val) {
+    if (val && strpbrk(val, "\r\n")) {
+        fprintf(stderr, "%s must not contain CR or LF\n", what);
+        return 1;
+    }
+    return 0;
+}
+
+struct req_buf {
+    char *buf;
+    size_t len;
+    size_t cap;
+};
+
+static int req_grow(struct req_buf *r, size_t need) {
+    size_t cap = r->cap ? r->cap : 1024;
+    while (cap < need) {
+        if (cap > SIZE_MAX / 2) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        cap *= 2;
+    }
+    char *buf = realloc(r->buf, cap);
+    if (!buf) return -1;
+    r->buf = buf;
+    r->cap = cap;
+    return 0;
+}
+
+static int req_appendf(struct req_buf *r, const char *fmt, ...) {
+    for (;;) {
+        if (r->len == SIZE_MAX) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        if (r->len + 1 > r->cap && req_grow(r, r->len + 1) < 0)
+            return -1;
+        size_t avail = r->cap - r->len;
+        va_list ap;
+        va_start(ap, fmt);
+        int n = vsnprintf(r->buf + r->len, avail, fmt, ap);
+        va_end(ap);
+        if (n < 0) return -1;
+        size_t add = (size_t)n;
+        if (add < avail) {
+            r->len += add;
+            return 0;
+        }
+        if (add >= SIZE_MAX - r->len) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        if (req_grow(r, r->len + add + 1) < 0)
+            return -1;
+    }
+}
+
+static int req_append_header(struct req_buf *r, const char *key,
+                             const char *val) {
+    if (reject_header_value(key, val)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return req_appendf(r, "%s: %s\n", key, val);
+}
+
 static int cmd_wait(const char *sock, const char *id) {
+    if (reject_header_value("id", id)) return 2;
+
     int fd = connect_sock(sock);
     if (fd < 0) { perror("connect"); return 1; }
 
@@ -246,47 +317,82 @@ static int cmd_run(const char *sock, int argc, char **argv) {
         return 2;
     }
 
+    if (o.id && reject_header_value("id", o.id)) return 2;
+    if (o.cpu_max && reject_header_value("cpu_max", o.cpu_max)) return 2;
+    if (o.memory_max && reject_header_value("memory_max", o.memory_max)) return 2;
+    if (o.memory_high && reject_header_value("memory_high", o.memory_high)) return 2;
+    if (o.memory_low && reject_header_value("memory_low", o.memory_low)) return 2;
+    if (o.memory_min && reject_header_value("memory_min", o.memory_min)) return 2;
+    if (o.memory_swap_max && reject_header_value("memory_swap_max", o.memory_swap_max)) return 2;
+    for (int i = 0; i < o.io_max_rulec; i++)
+        if (reject_header_value("io_max", o.io_max_rules[i])) return 2;
+    if (o.pids_max && reject_header_value("pids_max", o.pids_max)) return 2;
+    if (o.cpuset_cpus && reject_header_value("cpuset_cpus", o.cpuset_cpus)) return 2;
+    if (o.cpuset_mems && reject_header_value("cpuset_mems", o.cpuset_mems)) return 2;
+    if (o.cwd && reject_header_value("cwd", o.cwd)) return 2;
+    for (int i = 0; i < o.env_n; i++)
+        if (reject_header_value("env", o.env[i])) return 2;
+    for (int i = 0; i < o.require_n; i++)
+        if (reject_header_value("require_path", o.require_paths[i])) return 2;
+    for (int i = 0; i < o.service_n; i++)
+        if (reject_header_value("service", o.services[i])) return 2;
+    for (int i = optind; i < argc; i++)
+        if (reject_header_value("arg", argv[i])) return 2;
+
     int fd = connect_sock(sock);
     if (fd < 0) { perror("connect"); return 1; }
 
-    char hdr[16384];
-    size_t off = 0;
-    off += snprintf(hdr + off, sizeof(hdr) - off, "RUN\n");
-    if (o.id)              off += snprintf(hdr + off, sizeof(hdr) - off, "id: %s\n", o.id);
-    if (o.cpu_max)         off += snprintf(hdr + off, sizeof(hdr) - off, "cpu_max: %s\n", o.cpu_max);
-    if (o.cpu_weight)      off += snprintf(hdr + off, sizeof(hdr) - off, "cpu_weight: %d\n", o.cpu_weight);
-    if (o.memory_max)      off += snprintf(hdr + off, sizeof(hdr) - off, "memory_max: %s\n", o.memory_max);
-    if (o.memory_high)     off += snprintf(hdr + off, sizeof(hdr) - off, "memory_high: %s\n", o.memory_high);
-    if (o.memory_low)      off += snprintf(hdr + off, sizeof(hdr) - off, "memory_low: %s\n", o.memory_low);
-    if (o.memory_min)      off += snprintf(hdr + off, sizeof(hdr) - off, "memory_min: %s\n", o.memory_min);
-    if (o.memory_swap_max) off += snprintf(hdr + off, sizeof(hdr) - off, "memory_swap_max: %s\n", o.memory_swap_max);
-    if (o.io_weight)       off += snprintf(hdr + off, sizeof(hdr) - off, "io_weight: %d\n", o.io_weight);
+    struct req_buf req = {0};
+    if (req_appendf(&req, "RUN\n") < 0) goto request_error;
+    if (o.id && req_append_header(&req, "id", o.id) < 0) goto request_error;
+    if (o.cpu_max && req_append_header(&req, "cpu_max", o.cpu_max) < 0) goto request_error;
+    if (o.cpu_weight && req_appendf(&req, "cpu_weight: %d\n", o.cpu_weight) < 0) goto request_error;
+    if (o.memory_max && req_append_header(&req, "memory_max", o.memory_max) < 0) goto request_error;
+    if (o.memory_high && req_append_header(&req, "memory_high", o.memory_high) < 0) goto request_error;
+    if (o.memory_low && req_append_header(&req, "memory_low", o.memory_low) < 0) goto request_error;
+    if (o.memory_min && req_append_header(&req, "memory_min", o.memory_min) < 0) goto request_error;
+    if (o.memory_swap_max && req_append_header(&req, "memory_swap_max", o.memory_swap_max) < 0) goto request_error;
+    if (o.io_weight && req_appendf(&req, "io_weight: %d\n", o.io_weight) < 0) goto request_error;
     for (int i = 0; i < o.io_max_rulec; i++)
-        off += snprintf(hdr + off, sizeof(hdr) - off, "io_max: %s\n", o.io_max_rules[i]);
-    if (o.pids_max)        off += snprintf(hdr + off, sizeof(hdr) - off, "pids_max: %s\n", o.pids_max);
-    if (o.cpuset_cpus)     off += snprintf(hdr + off, sizeof(hdr) - off, "cpuset_cpus: %s\n", o.cpuset_cpus);
-    if (o.cpuset_mems)     off += snprintf(hdr + off, sizeof(hdr) - off, "cpuset_mems: %s\n", o.cpuset_mems);
-    if (o.priority >= 0)   off += snprintf(hdr + off, sizeof(hdr) - off, "priority: %d\n", o.priority);
-    if (o.cwd)             off += snprintf(hdr + off, sizeof(hdr) - off, "cwd: %s\n", o.cwd);
+        if (req_append_header(&req, "io_max", o.io_max_rules[i]) < 0) goto request_error;
+    if (o.pids_max && req_append_header(&req, "pids_max", o.pids_max) < 0) goto request_error;
+    if (o.cpuset_cpus && req_append_header(&req, "cpuset_cpus", o.cpuset_cpus) < 0) goto request_error;
+    if (o.cpuset_mems && req_append_header(&req, "cpuset_mems", o.cpuset_mems) < 0) goto request_error;
+    if (o.priority >= 0 && req_appendf(&req, "priority: %d\n", o.priority) < 0) goto request_error;
+    if (o.cwd && req_append_header(&req, "cwd", o.cwd) < 0) goto request_error;
     for (int i = 0; i < o.env_n; i++)
-        off += snprintf(hdr + off, sizeof(hdr) - off, "env: %s\n", o.env[i]);
+        if (req_append_header(&req, "env", o.env[i]) < 0) goto request_error;
     for (int i = 0; i < o.require_n; i++)
-        off += snprintf(hdr + off, sizeof(hdr) - off, "require_path: %s\n", o.require_paths[i]);
+        if (req_append_header(&req, "require_path", o.require_paths[i]) < 0) goto request_error;
     for (int i = 0; i < o.service_n; i++)
-        off += snprintf(hdr + off, sizeof(hdr) - off, "service: %s\n", o.services[i]);
+        if (req_append_header(&req, "service", o.services[i]) < 0) goto request_error;
     for (int i = optind; i < argc; i++)
-        off += snprintf(hdr + off, sizeof(hdr) - off, "arg: %s\n", argv[i]);
-    off += snprintf(hdr + off, sizeof(hdr) - off, "\n");
+        if (req_append_header(&req, "arg", argv[i]) < 0) goto request_error;
+    if (req_appendf(&req, "\n") < 0) goto request_error;
 
-    if (proto_write(fd, hdr, off) < 0) { perror("write"); close(fd); return 1; }
+    if (proto_write(fd, req.buf, req.len) < 0) {
+        perror("write");
+        free(req.buf);
+        close(fd);
+        return 1;
+    }
+    free(req.buf);
     shutdown(fd, SHUT_WR);
     int rc = read_response(fd, 1);
     close(fd);
     return rc;
+
+request_error:
+    perror("build run request");
+    free(req.buf);
+    close(fd);
+    return 1;
 }
 
 static int simple_cmd(const char *sock, const char *verb, const char *id,
                       int sig) {
+    if (id && reject_header_value("id", id)) return 2;
+
     int fd = connect_sock(sock);
     if (fd < 0) { perror("connect"); return 1; }
     char buf[512];
@@ -298,7 +404,16 @@ static int simple_cmd(const char *sock, const char *verb, const char *id,
         n = snprintf(buf, sizeof(buf), "%s\nid: %s\n\n", verb, id);
     else
         n = snprintf(buf, sizeof(buf), "%s\n\n", verb);
-    proto_write(fd, buf, (size_t)n);
+    if (n < 0 || (size_t)n >= sizeof(buf)) {
+        close(fd);
+        fprintf(stderr, "%s request too large\n", verb);
+        return 1;
+    }
+    if (proto_write(fd, buf, (size_t)n) < 0) {
+        perror("write");
+        close(fd);
+        return 1;
+    }
     shutdown(fd, SHUT_WR);
     int rc = read_response(fd, 1);
     close(fd);
@@ -382,6 +497,7 @@ int main(int argc, char **argv) {
     } else if (strcmp(cmd, "logs") == 0) {
         if (i >= argc) { usage(); return 2; }
         const char *id = argv[i++];
+        if (reject_header_value("id", id)) return 2;
         int follow = 0;
         for (; i < argc; i++)
             if (strcmp(argv[i], "--follow") == 0 || strcmp(argv[i], "-f") == 0)
@@ -391,7 +507,16 @@ int main(int argc, char **argv) {
         if (fd < 0) { perror("connect"); return 1; }
         char buf[8192];
         int n = snprintf(buf, sizeof(buf), "INSPECT\nid: %s\n\n", id);
-        proto_write(fd, buf, (size_t)n);
+        if (n < 0 || (size_t)n >= sizeof(buf)) {
+            close(fd);
+            fprintf(stderr, "logs request too large\n");
+            return 1;
+        }
+        if (proto_write(fd, buf, (size_t)n) < 0) {
+            perror("write");
+            close(fd);
+            return 1;
+        }
         shutdown(fd, SHUT_WR);
         char rbuf[16384];
         size_t off = 0;
