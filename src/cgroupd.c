@@ -660,14 +660,95 @@ static int spawn_job(struct daemon *d, struct job *j) {
 
  
 
-static int parse_cpu_max_to_buf(const char *v, char *dst, size_t dstlen) {
-     
-    if (!v || !*v) { dst[0] = '\0'; return -1; }
-    char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%s", v);
+static int parse_cpu_max_to_buf(const char *v, char *dst, size_t dstlen,
+                                char *reason, size_t reason_len) {
+    dst[0] = '\0';
+    if (!v) {
+        snprintf(reason, reason_len, "cpu_max: empty");
+        return -1;
+    }
+    while (*v == ' ' || *v == '\t') v++;
+    if (!*v) {
+        snprintf(reason, reason_len, "cpu_max: empty");
+        return -1;
+    }
+    char tmp[128];
+    if (snprintf(tmp, sizeof(tmp), "%s", v) >= (int)sizeof(tmp)) {
+        snprintf(reason, reason_len, "cpu_max: too long");
+        return -1;
+    }
+    size_t tlen = strlen(tmp);
+    while (tlen > 0 && (tmp[tlen-1] == ' ' || tmp[tlen-1] == '\t')) {
+        tmp[--tlen] = '\0';
+    }
+    if (tlen == 0) {
+        snprintf(reason, reason_len, "cpu_max: empty");
+        return -1;
+    }
+    if (strcmp(tmp, "max") == 0) {
+        snprintf(dst, dstlen, "max");
+        return 0;
+    }
     char *slash = strchr(tmp, '/');
-    if (slash) *slash = ' ';
-    snprintf(dst, dstlen, "%s", tmp);
+    char *space = strpbrk(tmp, " \t");
+    if (slash && space) {
+        snprintf(reason, reason_len, "cpu_max: mixed separators");
+        return -1;
+    }
+    char *sep = slash ? slash : space;
+    if (!sep) {
+        snprintf(reason, reason_len, "cpu_max: invalid value");
+        return -1;
+    }
+    if (slash && strchr(slash + 1, '/')) {
+        snprintf(reason, reason_len, "cpu_max: too many slashes");
+        return -1;
+    }
+    *sep = '\0';
+    char *q_str = tmp;
+    char *p_str = sep + 1;
+    while (*p_str == ' ' || *p_str == '\t') p_str++;
+    if (!*q_str) {
+        snprintf(reason, reason_len, "cpu_max: missing quota");
+        return -1;
+    }
+    if (!*p_str) {
+        snprintf(reason, reason_len, "cpu_max: missing period");
+        return -1;
+    }
+    if (strcmp(q_str, "max") != 0) {
+        for (const char *p = q_str; *p; p++) {
+            if (!isdigit((unsigned char)*p)) {
+                snprintf(reason, reason_len, "cpu_max: invalid quota");
+                return -1;
+            }
+        }
+        errno = 0;
+        char *end;
+        unsigned long long q = strtoull(q_str, &end, 10);
+        if (errno || *end || q == 0 || q > (unsigned long long)LLONG_MAX) {
+            snprintf(reason, reason_len, "cpu_max: quota out of range");
+            return -1;
+        }
+    }
+    for (const char *p = p_str; *p; p++) {
+        if (!isdigit((unsigned char)*p)) {
+            snprintf(reason, reason_len, "cpu_max: invalid period");
+            return -1;
+        }
+    }
+    errno = 0;
+    char *end;
+    unsigned long long pval = strtoull(p_str, &end, 10);
+    if (errno || *end || pval == 0 || pval > (unsigned long long)LLONG_MAX) {
+        snprintf(reason, reason_len, "cpu_max: invalid period");
+        return -1;
+    }
+    int n = snprintf(dst, dstlen, "%s %s", q_str, p_str);
+    if (n < 0 || (size_t)n >= dstlen) {
+        snprintf(reason, reason_len, "cpu_max: too long");
+        return -1;
+    }
     return 0;
 }
 
@@ -686,7 +767,13 @@ static int handle_run(struct daemon *d, const char *body, int cli_fd) {
         if (strcmp(k, "id") == 0) {
             snprintf(j->id, sizeof(j->id), "%s", v);
         } else if (strcmp(k, "cpu_max") == 0) {
-            parse_cpu_max_to_buf(v, j->cpu_max_buf, sizeof(j->cpu_max_buf));
+            char cm_reason[128];
+            if (parse_cpu_max_to_buf(v, j->cpu_max_buf, sizeof(j->cpu_max_buf),
+                                     cm_reason, sizeof(cm_reason)) < 0) {
+                proto_write_status(cli_fd, "err", "reason: %s\n", cm_reason);
+                job_release(d, j);
+                return -1;
+            }
             j->limits.cpu_max = j->cpu_max_buf;
         } else if (strcmp(k, "cpu_weight") == 0) {
             j->limits.cpu_weight = atoi(v);

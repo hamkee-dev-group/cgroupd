@@ -62,6 +62,7 @@ test: all
 	$(TEST_RUNNER) tests/cleanup.sh
 	$(TEST_RUNNER) tests/oom.sh
 	$(TEST_RUNNER) tests/pressure.sh
+	$(TEST_RUNNER) tests/limit_validation.sh
 
 bench: all
 	tests/run_bench.sh
