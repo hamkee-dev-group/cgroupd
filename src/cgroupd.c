@@ -660,6 +660,42 @@ static int spawn_job(struct daemon *d, struct job *j) {
 
  
 
+static int parse_weight_strict(const char *v, const char *key, int *out,
+                               char *reason, size_t reason_len) {
+    if (!v || !*v) {
+        snprintf(reason, reason_len, "%s: empty", key);
+        return -1;
+    }
+    const char *p = v;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) {
+        snprintf(reason, reason_len, "%s: empty", key);
+        return -1;
+    }
+    if (*p == '+' || *p == '-') {
+        snprintf(reason, reason_len, "%s: out of range", key);
+        return -1;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long val = strtoul(p, &end, 10);
+    if (errno || end == p) {
+        snprintf(reason, reason_len, "%s: invalid value", key);
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end) {
+        snprintf(reason, reason_len, "%s: invalid value", key);
+        return -1;
+    }
+    if (val < 1 || val > 10000) {
+        snprintf(reason, reason_len, "%s: out of range", key);
+        return -1;
+    }
+    *out = (int)val;
+    return 0;
+}
+
 static int parse_cpu_max_to_buf(const char *v, char *dst, size_t dstlen,
                                 char *reason, size_t reason_len) {
     dst[0] = '\0';
@@ -776,7 +812,13 @@ static int handle_run(struct daemon *d, const char *body, int cli_fd) {
             }
             j->limits.cpu_max = j->cpu_max_buf;
         } else if (strcmp(k, "cpu_weight") == 0) {
-            j->limits.cpu_weight = atoi(v);
+            char wreason[128];
+            if (parse_weight_strict(v, "cpu_weight", &j->limits.cpu_weight,
+                                    wreason, sizeof(wreason)) < 0) {
+                proto_write_status(cli_fd, "err", "reason: %s\n", wreason);
+                job_release(d, j);
+                return -1;
+            }
         } else if (strcmp(k, "cpuset_cpus") == 0) {
             snprintf(j->cpuset_cpus_buf, sizeof(j->cpuset_cpus_buf), "%s", v);
             j->limits.cpuset_cpus = j->cpuset_cpus_buf;
@@ -795,7 +837,13 @@ static int handle_run(struct daemon *d, const char *body, int cli_fd) {
             j->limits.memory_swap_max = parse_size(v);
             j->limits.memory_swap_max_set = 1;
         } else if (strcmp(k, "io_weight") == 0) {
-            j->limits.io_weight = atoi(v);
+            char wreason[128];
+            if (parse_weight_strict(v, "io_weight", &j->limits.io_weight,
+                                    wreason, sizeof(wreason)) < 0) {
+                proto_write_status(cli_fd, "err", "reason: %s\n", wreason);
+                job_release(d, j);
+                return -1;
+            }
         } else if (strcmp(k, "io_max") == 0) {
             if (j->limits.io_max_rulec < CG_IO_MAX_RULES)
                 j->limits.io_max_rules[j->limits.io_max_rulec++] = strdup(v);

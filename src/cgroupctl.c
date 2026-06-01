@@ -219,13 +219,13 @@ static int cmd_wait(const char *sock, const char *id) {
 struct run_opts {
     const char *id;
     const char *cpu_max;
-    int   cpu_weight;
+    const char *cpu_weight;
     const char *memory_max;
     const char *memory_high;
     const char *memory_low;
     const char *memory_min;
     const char *memory_swap_max;
-    int   io_weight;
+    const char *io_weight;
     const char *pids_max;
     const char *cpuset_cpus;
     const char *cpuset_mems;
@@ -280,13 +280,13 @@ static int cmd_run(const char *sock, int argc, char **argv) {
         switch (c) {
         case 'I': o.id = optarg; break;
         case 1001: o.cpu_max = optarg; break;
-        case 1002: o.cpu_weight = atoi(optarg); break;
+        case 1002: o.cpu_weight = optarg; break;
         case 1003: o.memory_max = optarg; break;
         case 1004: o.memory_high = optarg; break;
         case 1005: o.memory_low = optarg; break;
         case 1006: o.memory_min = optarg; break;
         case 1007: o.memory_swap_max = optarg; break;
-        case 1008: o.io_weight = atoi(optarg); break;
+        case 1008: o.io_weight = optarg; break;
         case 1009:
             if (io_max_rulec < 16) io_max_rules[io_max_rulec++] = optarg;
             break;
@@ -319,6 +319,8 @@ static int cmd_run(const char *sock, int argc, char **argv) {
 
     if (o.id && reject_header_value("id", o.id)) return 2;
     if (o.cpu_max && reject_header_value("cpu_max", o.cpu_max)) return 2;
+    if (o.cpu_weight && reject_header_value("cpu_weight", o.cpu_weight)) return 2;
+    if (o.io_weight && reject_header_value("io_weight", o.io_weight)) return 2;
     if (o.memory_max && reject_header_value("memory_max", o.memory_max)) return 2;
     if (o.memory_high && reject_header_value("memory_high", o.memory_high)) return 2;
     if (o.memory_low && reject_header_value("memory_low", o.memory_low)) return 2;
@@ -346,13 +348,13 @@ static int cmd_run(const char *sock, int argc, char **argv) {
     if (req_appendf(&req, "RUN\n") < 0) goto request_error;
     if (o.id && req_append_header(&req, "id", o.id) < 0) goto request_error;
     if (o.cpu_max && req_append_header(&req, "cpu_max", o.cpu_max) < 0) goto request_error;
-    if (o.cpu_weight && req_appendf(&req, "cpu_weight: %d\n", o.cpu_weight) < 0) goto request_error;
+    if (o.cpu_weight && req_append_header(&req, "cpu_weight", o.cpu_weight) < 0) goto request_error;
     if (o.memory_max && req_append_header(&req, "memory_max", o.memory_max) < 0) goto request_error;
     if (o.memory_high && req_append_header(&req, "memory_high", o.memory_high) < 0) goto request_error;
     if (o.memory_low && req_append_header(&req, "memory_low", o.memory_low) < 0) goto request_error;
     if (o.memory_min && req_append_header(&req, "memory_min", o.memory_min) < 0) goto request_error;
     if (o.memory_swap_max && req_append_header(&req, "memory_swap_max", o.memory_swap_max) < 0) goto request_error;
-    if (o.io_weight && req_appendf(&req, "io_weight: %d\n", o.io_weight) < 0) goto request_error;
+    if (o.io_weight && req_append_header(&req, "io_weight", o.io_weight) < 0) goto request_error;
     for (int i = 0; i < o.io_max_rulec; i++)
         if (req_append_header(&req, "io_max", o.io_max_rules[i]) < 0) goto request_error;
     if (o.pids_max && req_append_header(&req, "pids_max", o.pids_max) < 0) goto request_error;
