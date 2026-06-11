@@ -26,8 +26,8 @@ cleanup() {
 trap cleanup EXIT
 
 
-echo "==> starting cgroupd (mem-kill-avg10=5)"
-$SUDO "$CGROUPD" -d -s "$SOCK" -k 5.0 >"$LOG" 2>&1 &
+echo "==> starting cgroupd (mem-kill-avg10=0 — forced threshold)"
+$SUDO "$CGROUPD" -d -s "$SOCK" -k 0 >"$LOG" 2>&1 &
 PID=$!
 sleep 0.4
 
@@ -50,11 +50,11 @@ HIGH=$!
 wait "$LOW" "$HIGH" || true
 
 
-echo "==> watching for backpressure action (up to 12s)..."
+echo "==> watching for forced memory kill action (up to 12s)..."
 acted=0
 for i in $(seq 1 24); do
     sleep 0.5
-    if grep -qE 'FREEZE|KILL victim' "$LOG"; then
+    if grep -qE 'reason=pressure_memory' "$LOG"; then
         acted=1
         break
     fi
@@ -70,12 +70,11 @@ echo "==> list:"
 ctl list || true
 
 if [ "$acted" = "1" ]; then
-    echo "OK pressure: backpressure action observed"
+    echo "OK pressure: forced memory kill observed"
 else
-    echo "WARN pressure: no backpressure action observed in window"
-    
-    
-    grep -E 'Killed|reaped' "$LOG" || true
+    echo "FAIL pressure: no forced memory kill observed in window"
+    grep -E 'Killed|reaped|pressure' "$LOG" || true
+    exit 1
 fi
 
 echo "==> shutdown"

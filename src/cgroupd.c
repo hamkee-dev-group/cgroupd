@@ -139,7 +139,10 @@ struct daemon {
     uint64_t cpu_window_us;
     uint64_t io_stall_us;
     uint64_t io_window_us;
-    double   mem_avg10_kill;   
+    double   mem_avg10_kill;
+    double   mem_avg10_freeze_some;
+    double   cpu_avg10_demote_some;
+    double   io_avg10_freeze_full;
     double   mem_admit_some_avg10;
     double   mem_admit_full_avg10;
     double   cpu_admit_some_avg10;
@@ -1336,7 +1339,7 @@ static void backpressure_react(struct daemon *d, const char *resource) {
                 return;
             }
         }
-        if (p.some.avg10 >= 20.0) {
+        if (p.some.avg10 >= d->mem_avg10_freeze_some) {
              
             struct job *v = pick_victim_high_mem(d, 30);
             if (v && v->state == JOB_RUNNING) {
@@ -1355,7 +1358,7 @@ static void backpressure_react(struct daemon *d, const char *resource) {
             }
         }
     } else if (strcmp(resource, "cpu") == 0) {
-        if (p.some.avg10 >= 50.0) {
+        if (p.some.avg10 >= d->cpu_avg10_demote_some) {
             LOGW("cpu.some.avg10=%.2f -> demote low-prio cpu.weight",
                  p.some.avg10);
             event_logf("type=pressure resource=cpu some_avg10=%.2f "
@@ -1365,7 +1368,7 @@ static void backpressure_react(struct daemon *d, const char *resource) {
             d->last_action_ms = now;
         }
     } else if (strcmp(resource, "io") == 0) {
-        if (p.full.avg10 >= 30.0) {
+        if (p.full.avg10 >= d->io_avg10_freeze_full) {
             struct job *v = pick_victim_high_mem(d, 30);
             if (v && v->state == JOB_RUNNING) {
                 LOGW("io.full.avg10=%.2f -> FREEZE [%s] prio=%d",
@@ -1395,11 +1398,20 @@ static void tick(struct daemon *d) {
 
     
 
-    if (pmem.full.avg10 >= 1.0 || pmem.some.avg10 >= 1.0)
+    double mem_guard = d->mem_avg10_kill;
+    if (d->mem_avg10_freeze_some < mem_guard) mem_guard = d->mem_avg10_freeze_some;
+    if (1.0 < mem_guard) mem_guard = 1.0;
+    if (pmem.full.avg10 >= mem_guard || pmem.some.avg10 >= mem_guard)
         backpressure_react(d, "memory");
-    if (pcpu.some.avg10 >= 30.0)
+
+    double cpu_guard = d->cpu_avg10_demote_some;
+    if (30.0 < cpu_guard) cpu_guard = 30.0;
+    if (pcpu.some.avg10 >= cpu_guard)
         backpressure_react(d, "cpu");
-    if (pio.full.avg10 >= 5.0 || pio.some.avg10 >= 10.0)
+
+    double io_guard = d->io_avg10_freeze_full;
+    if (5.0 < io_guard) io_guard = 5.0;
+    if (pio.full.avg10 >= io_guard || pio.some.avg10 >= 10.0)
         backpressure_react(d, "io");
 
      
@@ -1481,6 +1493,9 @@ static void usage(void) {
 "  -s, --socket PATH       UNIX socket (default: /run/cgroupd.sock)\n"
 "  -d, --debug             enable debug logging\n"
 "  -k, --mem-kill-avg10 X  memory.full.avg10 above which we KILL a victim (default 60.0)\n"
+"      --mem-freeze-some-avg10 X memory.some.avg10 above which we FREEZE a victim (default 20.0)\n"
+"      --cpu-demote-some-avg10 X cpu.some.avg10 above which we demote low-prio cpu.weight (default 50.0)\n"
+"      --io-freeze-full-avg10 X  io.full.avg10 above which we FREEZE a victim (default 30.0)\n"
 "      --mem-admit-some-avg10 X  reject new jobs at/above this memory.some.avg10 (default 80.0)\n"
 "      --mem-admit-full-avg10 X  reject new jobs at/above this memory.full.avg10 (default 15.0)\n"
 "      --cpu-admit-some-avg10 X  reject new jobs at/above this cpu.some.avg10 (default 95.0)\n"
@@ -1500,6 +1515,9 @@ int main(int argc, char **argv) {
     d.io_stall_us   = 200000;
     d.io_window_us  = 1000000;
     d.mem_avg10_kill = 60.0;
+    d.mem_avg10_freeze_some = 20.0;
+    d.cpu_avg10_demote_some = 50.0;
+    d.io_avg10_freeze_full = 30.0;
     d.mem_admit_some_avg10 = 80.0;
     d.mem_admit_full_avg10 = 15.0;
     d.cpu_admit_some_avg10 = 95.0;
@@ -1518,6 +1536,9 @@ int main(int argc, char **argv) {
         {"mem-admit-full-avg10", required_argument, 0, 1002},
         {"cpu-admit-some-avg10", required_argument, 0, 1003},
         {"io-admit-full-avg10", required_argument, 0, 1004},
+        {"mem-freeze-some-avg10", required_argument, 0, 1005},
+        {"cpu-demote-some-avg10", required_argument, 0, 1006},
+        {"io-freeze-full-avg10", required_argument, 0, 1007},
         {"log-dir", required_argument, 0, 'L'},
         {"help", no_argument, 0, 'h'},
         {0,0,0,0}
@@ -1533,6 +1554,9 @@ int main(int argc, char **argv) {
         case 1002: d.mem_admit_full_avg10 = atof(optarg); break;
         case 1003: d.cpu_admit_some_avg10 = atof(optarg); break;
         case 1004: d.io_admit_full_avg10 = atof(optarg); break;
+        case 1005: d.mem_avg10_freeze_some = atof(optarg); break;
+        case 1006: d.cpu_avg10_demote_some = atof(optarg); break;
+        case 1007: d.io_avg10_freeze_full = atof(optarg); break;
         case 'L': log_dir_hint = optarg; break;
         case 'h': usage(); return 0;
         default:  usage(); return 2;
