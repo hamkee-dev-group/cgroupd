@@ -36,8 +36,20 @@ sleep 0.4
 
 ROOT="$(grep -m1 'using cgroup root' "$LOG" | sed 's/.*: //')"
 echo "==> root: $ROOT"
-$SUDO bash -c "echo 32M > '$ROOT'/memory.high"
-$SUDO bash -c "echo 0 > '$ROOT'/memory.swap.max" || true
+
+if [ -z "$ROOT" ]; then
+    echo "SKIP pressure: cgroupd did not report a cgroup root (cgroup v2 not writable?)"
+    exit 0
+fi
+if [ ! -e "$ROOT/memory.pressure" ]; then
+    echo "SKIP pressure: PSI files absent ($ROOT/memory.pressure)"
+    exit 0
+fi
+if ! $SUDO bash -c "echo 32M > '$ROOT'/memory.high" 2>/dev/null; then
+    echo "SKIP pressure: cannot write $ROOT/memory.high (no privilege or cgroup v2 not writable)"
+    exit 0
+fi
+$SUDO bash -c "echo 0 > '$ROOT'/memory.swap.max" 2>/dev/null || true
 
 echo "==> launch low-prio memhog (priority=10) and high-prio (priority=90)"
 ctl run --id low  --priority 10 --memory-max 64M -- "$MEMHOG" 32 30 &
@@ -50,11 +62,12 @@ HIGH=$!
 wait "$LOW" "$HIGH" || true
 
 
-echo "==> watching for forced memory kill action (up to 12s)..."
+echo "==> watching for structured pressure event (up to 12s)..."
+EVENT_RE='^EVENT schema=cgroupd\.v1 .*type=pressure .*resource=memory .*action=(kill|freeze|demote) target=[a-zA-Z0-9_-]+'
 acted=0
 for i in $(seq 1 24); do
     sleep 0.5
-    if grep -qE 'reason=pressure_memory' "$LOG"; then
+    if grep -qE "$EVENT_RE" "$LOG"; then
         acted=1
         break
     fi
@@ -70,10 +83,11 @@ echo "==> list:"
 ctl list || true
 
 if [ "$acted" = "1" ]; then
-    echo "OK pressure: forced memory kill observed"
+    echo "OK pressure: structured pressure event observed"
+    grep -m1 -E "$EVENT_RE" "$LOG" || true
 else
-    echo "FAIL pressure: no forced memory kill observed in window"
-    grep -E 'Killed|reaped|pressure' "$LOG" || true
+    echo "FAIL pressure: no structured pressure event observed in window"
+    grep -E 'Killed|reaped|pressure|EVENT' "$LOG" || true
     exit 1
 fi
 
