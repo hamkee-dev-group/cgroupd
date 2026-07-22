@@ -229,7 +229,7 @@ struct run_opts {
     const char *pids_max;
     const char *cpuset_cpus;
     const char *cpuset_mems;
-    int   priority;
+    const char *priority;
     const char *cwd;
     char **env;
     int    env_n;
@@ -243,7 +243,6 @@ struct run_opts {
 
 static int cmd_run(const char *sock, int argc, char **argv) {
     struct run_opts o = {0};
-    o.priority = -1;
     char *envs[64];
     int env_n = 0;
     char *io_max_rules[16];
@@ -299,7 +298,7 @@ static int cmd_run(const char *sock, int argc, char **argv) {
         case 1014:
             if (service_n < 16) services[service_n++] = optarg;
             break;
-        case 'p': o.priority = atoi(optarg); break;
+        case 'p': o.priority = optarg; break;
         case 'C': o.cwd = optarg; break;
         case 'e':
             if (env_n < 64) envs[env_n++] = optarg;
@@ -331,6 +330,7 @@ static int cmd_run(const char *sock, int argc, char **argv) {
     if (o.pids_max && reject_header_value("pids_max", o.pids_max)) return 2;
     if (o.cpuset_cpus && reject_header_value("cpuset_cpus", o.cpuset_cpus)) return 2;
     if (o.cpuset_mems && reject_header_value("cpuset_mems", o.cpuset_mems)) return 2;
+    if (o.priority && reject_header_value("priority", o.priority)) return 2;
     if (o.cwd && reject_header_value("cwd", o.cwd)) return 2;
     for (int i = 0; i < o.env_n; i++)
         if (reject_header_value("env", o.env[i])) return 2;
@@ -360,7 +360,7 @@ static int cmd_run(const char *sock, int argc, char **argv) {
     if (o.pids_max && req_append_header(&req, "pids_max", o.pids_max) < 0) goto request_error;
     if (o.cpuset_cpus && req_append_header(&req, "cpuset_cpus", o.cpuset_cpus) < 0) goto request_error;
     if (o.cpuset_mems && req_append_header(&req, "cpuset_mems", o.cpuset_mems) < 0) goto request_error;
-    if (o.priority >= 0 && req_appendf(&req, "priority: %d\n", o.priority) < 0) goto request_error;
+    if (o.priority && req_append_header(&req, "priority", o.priority) < 0) goto request_error;
     if (o.cwd && req_append_header(&req, "cwd", o.cwd) < 0) goto request_error;
     for (int i = 0; i < o.env_n; i++)
         if (req_append_header(&req, "env", o.env[i]) < 0) goto request_error;

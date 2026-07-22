@@ -699,6 +699,38 @@ static int parse_weight_strict(const char *v, const char *key, int *out,
     return 0;
 }
 
+static int parse_priority_strict(const char *v, int *out,
+                                 char *reason, size_t reason_len) {
+    if (!v || !*v) {
+        snprintf(reason, reason_len, "priority: empty");
+        return -1;
+    }
+    const char *p = v;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) {
+        snprintf(reason, reason_len, "priority: empty");
+        return -1;
+    }
+    errno = 0;
+    char *end = NULL;
+    long val = strtol(p, &end, 10);
+    if (errno || end == p) {
+        snprintf(reason, reason_len, "priority: invalid value");
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end) {
+        snprintf(reason, reason_len, "priority: invalid value");
+        return -1;
+    }
+    if (val < 0 || val > 100) {
+        snprintf(reason, reason_len, "priority: out of range");
+        return -1;
+    }
+    *out = (int)val;
+    return 0;
+}
+
 static int parse_cpu_max_to_buf(const char *v, char *dst, size_t dstlen,
                                 char *reason, size_t reason_len) {
     dst[0] = '\0';
@@ -853,9 +885,13 @@ static int handle_run(struct daemon *d, const char *body, int cli_fd) {
         } else if (strcmp(k, "pids_max") == 0) {
             j->limits.pids_max = parse_size(v);
         } else if (strcmp(k, "priority") == 0) {
-            j->priority = atoi(v);
-            if (j->priority < 0) j->priority = 0;
-            if (j->priority > 100) j->priority = 100;
+            char preason[128];
+            if (parse_priority_strict(v, &j->priority,
+                                      preason, sizeof(preason)) < 0) {
+                proto_write_status(cli_fd, "err", "reason: %s\n", preason);
+                job_release(d, j);
+                return -1;
+            }
         } else if (strcmp(k, "cwd") == 0) {
             snprintf(j->cwd, sizeof(j->cwd), "%s", v);
         } else if (strcmp(k, "require_path") == 0) {

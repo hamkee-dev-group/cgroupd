@@ -199,6 +199,78 @@ accept_weight io_weight  --io-weight  min   '1'
 accept_weight io_weight  --io-weight  mid   '100'
 accept_weight io_weight  --io-weight  max   '10000'
 
+reject_priority() {
+    local label="$1"; shift
+    local val="$1"; shift
+    local id="priority-bad-$label"
+    set +e
+    local out
+    out="$(ctl run --id "$id" --priority "$val" -- /bin/true 2>&1)"
+    local rc=$?
+    set -e
+    printf '==> --priority %q rejected: rc=%d\n' "$val" "$rc"
+    [ "$rc" -ne 0 ] || { echo "FAIL --priority $val unexpectedly accepted"; exit 1; }
+    printf '%s\n' "$out" | grep -q '^STATUS: err' || {
+        echo "FAIL missing STATUS: err for --priority $val"
+        printf '%s\n' "$out"
+        exit 1
+    }
+    printf '%s\n' "$out" | grep -q '^reason: priority' || {
+        echo "FAIL reason did not name priority for --priority $val"
+        printf '%s\n' "$out"
+        exit 1
+    }
+    set +e
+    ctl inspect "$id" >/dev/null 2>&1
+    local inrc=$?
+    set -e
+    [ "$inrc" -ne 0 ] || { echo "FAIL job $id is inspectable after rejection"; exit 1; }
+}
+
+reject_priority garbage  'foo'
+reject_priority too-high '101'
+reject_priority negative '-1'
+reject_priority empty    ''
+
+echo "==> daemon emitted no job.start for any rejected priority id"
+if grep -E 'type=job\.start id=priority-bad-' "$LOG" >/dev/null; then
+    echo "FAIL job.start event emitted for a rejected priority job"
+    grep -E 'type=job\.start id=priority-bad-' "$LOG" || true
+    exit 1
+fi
+
+if [ -n "$DROOT" ] && [ -d "$DROOT" ]; then
+    for case in garbage too-high negative empty; do
+        id="priority-bad-$case"
+        if [ -e "$DROOT/$id" ]; then
+            echo "FAIL per-job cgroup directory exists for rejected $id: $DROOT/$id"
+            exit 1
+        fi
+    done
+fi
+
+accept_priority() {
+    local label="$1"; shift
+    local val="$1"; shift
+    local id="priority-ok-$label"
+    set +e
+    local out
+    out="$(ctl run --id "$id" --priority "$val" -- /bin/true 2>&1)"
+    local rc=$?
+    set -e
+    printf '==> --priority %q accepted: rc=%d\n' "$val" "$rc"
+    [ "$rc" -eq 0 ] || { echo "FAIL --priority $val unexpectedly rejected"; printf '%s\n' "$out"; exit 1; }
+    printf '%s\n' "$out" | grep -q '^STATUS: ok' || {
+        echo "FAIL missing STATUS: ok for --priority $val"
+        printf '%s\n' "$out"
+        exit 1
+    }
+}
+
+accept_priority min '0'
+accept_priority mid '50'
+accept_priority max '100'
+
 echo "==> shutdown"
 ctl quit >/dev/null
 wait "$PID" 2>/dev/null || true
