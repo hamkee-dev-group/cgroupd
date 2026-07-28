@@ -392,15 +392,16 @@ request_error:
 }
 
 static int simple_cmd(const char *sock, const char *verb, const char *id,
-                      int sig) {
+                      const char *sig) {
     if (id && reject_header_value("id", id)) return 2;
+    if (sig && reject_header_value("signal", sig)) return 2;
 
     int fd = connect_sock(sock);
     if (fd < 0) { perror("connect"); return 1; }
     char buf[512];
     int n;
     if (id && sig)
-        n = snprintf(buf, sizeof(buf), "%s\nid: %s\nsignal: %d\n\n",
+        n = snprintf(buf, sizeof(buf), "%s\nid: %s\nsignal: %s\n\n",
                      verb, id, sig);
     else if (id)
         n = snprintf(buf, sizeof(buf), "%s\nid: %s\n\n", verb, id);
@@ -468,31 +469,43 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "run") == 0) {
         return cmd_run(sock, argc - i + 1, argv + i - 1);
     } else if (strcmp(cmd, "list") == 0) {
-        return simple_cmd(sock, "LIST", NULL, 0);
+        return simple_cmd(sock, "LIST", NULL, NULL);
     } else if (strcmp(cmd, "kill") == 0) {
         if (i >= argc) { usage(); return 2; }
         const char *id = argv[i++];
-        int sig = 0;
-        if (i + 1 < argc &&
-            (strcmp(argv[i], "signal") == 0 ||
-             strcmp(argv[i], "--signal") == 0) ) {
-            sig = atoi(argv[i+1]);
+        const char *sig = NULL;
+        if (i < argc) {
+            if (strcmp(argv[i], "signal") != 0 &&
+                strcmp(argv[i], "--signal") != 0) {
+                fprintf(stderr, "kill: unexpected argument '%s'\n", argv[i]);
+                return 2;
+            }
+            if (i + 1 >= argc) {
+                fprintf(stderr, "kill: --signal requires a value\n");
+                return 2;
+            }
+            sig = argv[i+1];
+            i += 2;
+            if (i < argc) {
+                fprintf(stderr, "kill: unexpected argument '%s'\n", argv[i]);
+                return 2;
+            }
         }
         return simple_cmd(sock, "KILL", id, sig);
     } else if (strcmp(cmd, "freeze") == 0) {
         if (i >= argc) { usage(); return 2; }
-        return simple_cmd(sock, "FREEZE", argv[i], 0);
+        return simple_cmd(sock, "FREEZE", argv[i], NULL);
     } else if (strcmp(cmd, "thaw") == 0) {
         if (i >= argc) { usage(); return 2; }
-        return simple_cmd(sock, "THAW", argv[i], 0);
+        return simple_cmd(sock, "THAW", argv[i], NULL);
     } else if (strcmp(cmd, "inspect") == 0) {
         if (i >= argc) { usage(); return 2; }
-        return simple_cmd(sock, "INSPECT", argv[i], 0);
+        return simple_cmd(sock, "INSPECT", argv[i], NULL);
     } else if (strcmp(cmd, "stats") == 0) {
-        return simple_cmd(sock, "STATS", NULL, 0);
+        return simple_cmd(sock, "STATS", NULL, NULL);
     } else if (strcmp(cmd, "remove") == 0) {
         if (i >= argc) { usage(); return 2; }
-        return simple_cmd(sock, "REMOVE", argv[i], 0);
+        return simple_cmd(sock, "REMOVE", argv[i], NULL);
     } else if (strcmp(cmd, "wait") == 0) {
         if (i >= argc) { usage(); return 2; }
         return cmd_wait(sock, argv[i]);
@@ -559,9 +572,9 @@ int main(int argc, char **argv) {
         fclose(fp);
         return 0;
     } else if (strcmp(cmd, "ping") == 0) {
-        return simple_cmd(sock, "PING", NULL, 0);
+        return simple_cmd(sock, "PING", NULL, NULL);
     } else if (strcmp(cmd, "quit") == 0) {
-        return simple_cmd(sock, "QUIT", NULL, 0);
+        return simple_cmd(sock, "QUIT", NULL, NULL);
     } else {
         usage();
         return 2;

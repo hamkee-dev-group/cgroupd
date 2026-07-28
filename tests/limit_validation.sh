@@ -271,6 +271,72 @@ accept_priority min '0'
 accept_priority mid '50'
 accept_priority max '100'
 
+echo "==> starting long-lived job for kill-signal validation"
+ctl run --id kill-target -- /bin/sleep 300 >/dev/null
+ctl inspect kill-target 2>/dev/null | grep -q '^state: running' || {
+    echo "FAIL kill-target did not start running"; exit 1;
+}
+
+assert_running() {
+    ctl inspect kill-target 2>/dev/null | grep -q '^state: running' || {
+        echo "FAIL kill-target not running after $1"
+        exit 1
+    }
+}
+
+reject_signal() {
+    local val="$1"; shift
+    set +e
+    local out
+    out="$(ctl kill kill-target --signal "$val" 2>&1)"
+    local rc=$?
+    set -e
+    printf '==> kill --signal %q rejected: rc=%d\n' "$val" "$rc"
+    [ "$rc" -ne 0 ] || { echo "FAIL kill --signal $val unexpectedly accepted"; printf '%s\n' "$out"; exit 1; }
+    printf '%s\n' "$out" | grep -q '^STATUS: err' || {
+        echo "FAIL missing STATUS: err for kill --signal $val"
+        printf '%s\n' "$out"
+        exit 1
+    }
+    printf '%s\n' "$out" | grep -q '^reason: signal' || {
+        echo "FAIL reason did not name signal for kill --signal $val"
+        printf '%s\n' "$out"
+        exit 1
+    }
+    assert_running "invalid kill --signal $val"
+}
+
+reject_signal 'abc'
+reject_signal '0'
+reject_signal '-1'
+reject_signal '999999'
+reject_signal 'foo'
+reject_signal '999'
+
+echo "==> kill rejects malformed signal option syntax"
+set +e
+ctl kill kill-target --signal >/dev/null 2>&1
+[ $? -ne 0 ] || { echo "FAIL kill --signal without value accepted"; exit 1; }
+ctl kill kill-target --signal 15 extra >/dev/null 2>&1
+[ $? -ne 0 ] || { echo "FAIL kill --signal with trailing argument accepted"; exit 1; }
+ctl kill kill-target bogus >/dev/null 2>&1
+[ $? -ne 0 ] || { echo "FAIL kill with unexpected argument accepted"; exit 1; }
+set -e
+assert_running "malformed signal option syntax"
+
+echo "==> valid kill --signal keeps working"
+set +e
+KOUT="$(ctl kill kill-target --signal 18 2>&1)"
+KRC=$?
+set -e
+[ "$KRC" -eq 0 ] || { echo "FAIL kill --signal 18 unexpectedly rejected"; printf '%s\n' "$KOUT"; exit 1; }
+printf '%s\n' "$KOUT" | grep -q '^STATUS: ok' || {
+    echo "FAIL missing STATUS: ok for kill --signal 18"
+    printf '%s\n' "$KOUT"
+    exit 1
+}
+assert_running "valid kill --signal 18"
+
 echo "==> shutdown"
 ctl quit >/dev/null
 wait "$PID" 2>/dev/null || true

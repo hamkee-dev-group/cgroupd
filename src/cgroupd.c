@@ -1000,15 +1000,58 @@ static int handle_list(struct daemon *d, int cli_fd) {
     return proto_write_status(cli_fd, "ok", "count: %d\n", n);
 }
 
+static int parse_signal_strict(const char *v, int *out,
+                               char *reason, size_t reason_len) {
+    if (!v || !*v) {
+        snprintf(reason, reason_len, "signal: empty");
+        return -1;
+    }
+    const char *p = v;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) {
+        snprintf(reason, reason_len, "signal: empty");
+        return -1;
+    }
+    if (*p == '+' || *p == '-') {
+        snprintf(reason, reason_len, "signal: out of range");
+        return -1;
+    }
+    errno = 0;
+    char *end = NULL;
+    unsigned long val = strtoul(p, &end, 10);
+    if (errno || end == p) {
+        snprintf(reason, reason_len, "signal: invalid value");
+        return -1;
+    }
+    while (*end == ' ' || *end == '\t') end++;
+    if (*end) {
+        snprintf(reason, reason_len, "signal: invalid value");
+        return -1;
+    }
+    if (val < 1 || val > (unsigned long)SIGRTMAX) {
+        snprintf(reason, reason_len, "signal: out of range");
+        return -1;
+    }
+    *out = (int)val;
+    return 0;
+}
+
 static int handle_kill(struct daemon *d, const char *body, int cli_fd) {
     char scratch[1024], *k, *v;
     const char *cur = body;
     char id[64] = {0};
     int sig = SIGKILL;
+    char sig_reason[128];
+    int sig_bad = 0;
     while (proto_next_header(&cur, scratch, sizeof(scratch), &k, &v) == 1) {
         if (strcmp(k, "id") == 0) snprintf(id, sizeof(id), "%s", v);
-        else if (strcmp(k, "signal") == 0) sig = atoi(v);
+        else if (strcmp(k, "signal") == 0) {
+            if (parse_signal_strict(v, &sig, sig_reason, sizeof(sig_reason)) < 0)
+                sig_bad = 1;
+        }
     }
+    if (sig_bad)
+        return proto_write_status(cli_fd, "err", "reason: %s\n", sig_reason);
     struct job *j = job_find(d, id);
     if (!j) return proto_write_status(cli_fd, "err", "reason: no such job\nid: %s\n", id);
     if (sig == SIGKILL) {
