@@ -63,6 +63,7 @@ test: all
 	$(TEST_RUNNER) tests/oom.sh
 	$(TEST_RUNNER) tests/pressure.sh
 	$(TEST_RUNNER) tests/limit_validation.sh
+	$(TEST_RUNNER) tests/id_validation.sh
 
 bench: all
 	tests/run_bench.sh

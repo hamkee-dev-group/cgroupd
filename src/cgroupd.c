@@ -699,6 +699,31 @@ static int parse_weight_strict(const char *v, const char *key, int *out,
     return 0;
 }
 
+static int validate_job_id(const char *v, char *reason, size_t reason_len) {
+    if (!v || !*v) {
+        snprintf(reason, reason_len, "id: empty");
+        return -1;
+    }
+    size_t len = strlen(v);
+    if (len >= 64) {
+        snprintf(reason, reason_len, "id: too long");
+        return -1;
+    }
+    unsigned char first = (unsigned char)v[0];
+    if (!isalnum(first)) {
+        snprintf(reason, reason_len, "id: must start with a letter or digit");
+        return -1;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)v[i];
+        if (isalnum(c) || c == '.' || c == '_' || c == '-')
+            continue;
+        snprintf(reason, reason_len, "id: invalid character");
+        return -1;
+    }
+    return 0;
+}
+
 static int parse_priority_strict(const char *v, int *out,
                                  char *reason, size_t reason_len) {
     if (!v || !*v) {
@@ -836,6 +861,12 @@ static int handle_run(struct daemon *d, const char *body, int cli_fd) {
     int rc;
     while ((rc = proto_next_header(&cur, scratch, sizeof(scratch), &k, &v)) == 1) {
         if (strcmp(k, "id") == 0) {
+            char id_reason[128];
+            if (validate_job_id(v, id_reason, sizeof(id_reason)) < 0) {
+                proto_write_status(cli_fd, "err", "reason: %s\n", id_reason);
+                job_release(d, j);
+                return -1;
+            }
             snprintf(j->id, sizeof(j->id), "%s", v);
         } else if (strcmp(k, "cpu_max") == 0) {
             char cm_reason[128];

@@ -147,6 +147,11 @@ int cg_setup_root(const char *root_path) {
 }
 
 int cg_create_child(const char *parent, const char *name, char *dst, size_t dstlen) {
+    if (!name || !*name || strchr(name, '/') ||
+        strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        errno = EINVAL;
+        return -1;
+    }
     if (snprintf(dst, dstlen, "%s/%s", parent, name) >= (int)dstlen) {
         errno = ENAMETOOLONG;
         return -1;
