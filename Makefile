@@ -55,6 +55,7 @@ install: all
 
 test: all
 	tests/protocol_injection.sh
+	tests/event_loop_liveness.sh
 	$(TEST_RUNNER) tests/smoke.sh
 	$(TEST_RUNNER) tests/wait.sh
 	$(TEST_RUNNER) tests/admission.sh

@@ -11,40 +11,28 @@
 #include <unistd.h>
 
  
-int proto_read_msg(int fd, char **out_buf, size_t *out_len) {
-    size_t cap = 1024, len = 0;
-    char *buf = malloc(cap);
-    if (!buf) return -1;
-    int saw_nl = 0;  
-    while (1) {
-        if (len + 1 >= cap) {
-            if (cap >= 1u << 22) { free(buf); errno = E2BIG; return -1; }
-            cap *= 2;
-            char *nb = realloc(buf, cap);
-            if (!nb) { free(buf); return -1; }
-            buf = nb;
-        }
-        ssize_t n = read(fd, buf + len, cap - len - 1);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            free(buf);
-            return -1;
-        }
-        if (n == 0) {
-            if (len == 0) { free(buf); return 1; }   
-            break;
-        }
-        len += (size_t)n;
-        buf[len] = '\0';
-         
-        for (size_t i = 1; i < len; i++) {
-            if (buf[i-1] == '\n' && buf[i] == '\n') { saw_nl = 1; break; }
-        }
-        if (saw_nl) break;
+int proto_read_msg(int fd, char **buf, size_t *len, size_t *cap) {
+    if (*len + 1 >= *cap) {
+        if (*cap >= 1u << 22) { errno = E2BIG; return -1; }
+        size_t ncap = *cap ? *cap * 2 : 1024;
+        char *nb = realloc(*buf, ncap);
+        if (!nb) return -1;
+        *buf = nb;
+        *cap = ncap;
     }
-    *out_buf = buf;
-    *out_len = len;
-    return 0;
+    ssize_t n = read(fd, *buf + *len, *cap - *len - 1);
+    if (n < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) return 2;
+        return -1;
+    }
+    if (n == 0) return *len == 0 ? 1 : 0;
+    size_t i = *len ? *len : 1;
+    *len += (size_t)n;
+    (*buf)[*len] = '\0';
+    for (; i < *len; i++) {
+        if ((*buf)[i-1] == '\n' && (*buf)[i] == '\n') return 0;
+    }
+    return 2;
 }
 
 int proto_write(int fd, const char *buf, size_t len) {

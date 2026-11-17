@@ -61,6 +61,7 @@ static long sys_clone3(struct clone_args_compat *a, size_t s) {
 #define MAX_ENVP  64
 #define MAX_SERVICES 8
 #define MAX_REQUIRE_PATHS 8
+#define REQ_DEADLINE_MS 5000
 
 enum job_state {
     JOB_PENDING = 0,
@@ -119,6 +120,18 @@ struct job {
     int   waiters[MAX_WAITERS];
 };
 
+#define CONN_CLIENT 1
+
+struct conn {
+    int    kind;
+    int    fd;
+    char  *buf;
+    size_t len;
+    size_t cap;
+    uint64_t accept_ms;
+    struct conn *next;
+};
+
 struct daemon {
     char root[PATH_MAX];
     char sock_path[PATH_MAX];
@@ -152,6 +165,8 @@ struct daemon {
     int next_slot;
 
     uint64_t last_action_ms;
+
+    struct conn *conns;
 };
 
 static volatile sig_atomic_t g_stop = 0;
@@ -1266,19 +1281,11 @@ static int handle_remove(struct daemon *d, const char *body, int cli_fd) {
 }
 
  
-static int handle_client(struct daemon *d, int cli_fd) {
-    char *buf = NULL;
-    size_t len = 0;
-    int r = proto_read_msg(cli_fd, &buf, &len);
-    if (r != 0) {
-        if (buf) free(buf);
-        return 0;
-    }
+static int handle_client(struct daemon *d, int cli_fd, const char *buf) {
     char verb[32];
     const char *body_start = proto_verb(buf, verb, sizeof(verb));
     if (!body_start) {
         proto_write_status(cli_fd, "err", "reason: missing verb\n");
-        free(buf);
         return 0;
     }
 
@@ -1300,7 +1307,6 @@ static int handle_client(struct daemon *d, int cli_fd) {
     }
     else proto_write_status(cli_fd, "err", "reason: unknown verb\nverb: %s\n", verb);
 
-    free(buf);
     return keep_open;
 }
 
@@ -1592,6 +1598,55 @@ static void epoll_add(int epfd, int fd, uint32_t events, void *tag) {
     epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
 }
 
+static void conn_add(struct daemon *d, int fd) {
+    struct conn *c = calloc(1, sizeof(*c));
+    if (!c) { close(fd); return; }
+    c->kind = CONN_CLIENT;
+    c->fd = fd;
+    c->accept_ms = now_ms();
+    c->next = d->conns;
+    d->conns = c;
+    epoll_add(d->epfd, fd, EPOLLIN, c);
+}
+
+static void conn_close(struct daemon *d, struct conn *c, int keep_fd) {
+    struct conn **pp = &d->conns;
+    while (*pp != c) pp = &(*pp)->next;
+    *pp = c->next;
+    /* Explicit: close() alone leaves the registration (and this pointer)
+     * live while a forked child still holds a copy of the fd. */
+    epoll_ctl(d->epfd, EPOLL_CTL_DEL, c->fd, NULL);
+    if (!keep_fd) close(c->fd);
+    free(c->buf);
+    free(c);
+}
+
+static void conn_readable(struct daemon *d, struct conn *c) {
+    int r = proto_read_msg(c->fd, &c->buf, &c->len, &c->cap);
+    if (r == 2) return;
+    int keep = 0;
+    if (r == 0) {
+        /* Responses are still written synchronously; left nonblocking, one
+         * larger than the socket buffer would be cut short. */
+        fcntl(c->fd, F_SETFL, fcntl(c->fd, F_GETFL) & ~O_NONBLOCK);
+        keep = handle_client(d, c->fd, c->buf);
+    }
+    conn_close(d, c, keep);
+}
+
+static void conn_expire(struct daemon *d) {
+    uint64_t now = now_ms();
+    struct conn *c = d->conns;
+    while (c) {
+        struct conn *next = c->next;
+        if (now - c->accept_ms >= REQ_DEADLINE_MS) {
+            proto_write_status(c->fd, "err", "reason: request timeout\n");
+            conn_close(d, c, 0);
+        }
+        c = next;
+    }
+}
+
  
 static int TAG_SOCK, TAG_SIG, TAG_TIMER, TAG_PSI_MEM, TAG_PSI_CPU, TAG_PSI_IO;
 
@@ -1747,19 +1802,20 @@ int main(int argc, char **argv) {
             LOGE("epoll_wait: %s", strerror(errno));
             break;
         }
+        int expire = 0;
         for (int i = 0; i < n; i++) {
             void *tag = ev[i].data.ptr;
             if (tag == &TAG_SOCK) {
                 while (1) {
-                    int cli = accept4(d.sock_fd, NULL, NULL, SOCK_CLOEXEC);
+                    int cli = accept4(d.sock_fd, NULL, NULL,
+                                      SOCK_NONBLOCK | SOCK_CLOEXEC);
                     if (cli < 0) {
                         if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         if (errno == EINTR) continue;
                         LOGW("accept: %s", strerror(errno));
                         break;
                     }
-                    int keep = handle_client(&d, cli);
-                    if (!keep) close(cli);
+                    conn_add(&d, cli);
                 }
             } else if (tag == &TAG_SIG) {
                 struct signalfd_siginfo si;
@@ -1775,6 +1831,7 @@ int main(int argc, char **argv) {
                 uint64_t expirations;
                 while (read(d.timerfd, &expirations, sizeof(expirations)) > 0) {}
                 tick(&d);
+                expire = 1;
             } else if (tag == &TAG_PSI_MEM) {
                 LOGW("PSI memory threshold tripped");
                 backpressure_react(&d, "memory");
@@ -1784,6 +1841,10 @@ int main(int argc, char **argv) {
             } else if (tag == &TAG_PSI_IO) {
                 LOGW("PSI io threshold tripped");
                 backpressure_react(&d, "io");
+            } else if ((char *)tag <  (char *)&d.jobs[0] ||
+                       (char *)tag >= (char *)&d.jobs[MAX_JOBS]) {
+                struct conn *c = (struct conn *)tag;
+                if (c->kind == CONN_CLIENT) conn_readable(&d, c);
             } else {
                  
                 struct job *j = (struct job *)tag;
@@ -1809,6 +1870,9 @@ int main(int argc, char **argv) {
                 }
             }
         }
+        /* Deferred past the batch: a later event in it may still point at
+         * a connection this would free. */
+        if (expire) conn_expire(&d);
     }
 
     LOGI("shutdown: killing remaining jobs");
@@ -1831,6 +1895,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (d.jobs[i].used) job_release(&d, &d.jobs[i]);
     }
+    while (d.conns) conn_close(&d, d.conns, 0);
     unlink(d.sock_path);
     LOGI("bye");
     return 0;

@@ -39,7 +39,10 @@
 
 
 
-int proto_read_msg(int fd, char **out_buf, size_t *out_len);
+/* One read() on a nonblocking fd, appended to the caller-owned *buf (start
+ * with NULL/0/0; free it on every result). Returns 0 when *buf holds a whole
+ * request, 2 when more data is needed, 1 on EOF before any data, -1 on error. */
+int proto_read_msg(int fd, char **buf, size_t *len, size_t *cap);
 
 
 
